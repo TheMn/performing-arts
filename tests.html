@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dance × Farandole — tests</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; padding: 0 1rem; background: #fafafa; color: #222; }
+  h1 { font-size: 1.3rem; }
+  .pass { color: #0a7a2f; } .fail { color: #c0172b; font-weight: 600; }
+  li { margin: .15rem 0; } code { background: #eee; padding: 0 .25em; }
+  #summary { font-weight: 700; margin: 1rem 0; }
+</style>
+</head>
+<body>
+<h1>Dance × Farandole — in-browser tests</h1>
+<p>Pure logic from <code>people.js</code> and <code>melody.js</code>. Open this page via the local server (ES modules need http://).</p>
+<div id="summary">Running…</div>
+<ul id="results"></ul>
+<script type="module">
+import { CONFIG } from "./config.js";
+import {
+  matchPeople, closenessToBand, computeMotion, normalizeMotion, isArmsUp, checkRing,
+  computeHandPairs, poseFeatures, PeopleTracker, LM,
+} from "./people.js";
+import { extractLine } from "./melody.js";
+
+const results = [];
+function test(name, fn) {
+  try { fn(); results.push({ name, ok: true }); }
+  catch (e) { results.push({ name, ok: false, err: e.message || String(e) }); }
+}
+function eq(a, b, msg = "") {
+  if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+}
+function ok(cond, msg = "assertion failed") { if (!cond) throw new Error(msg); }
+const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
+
+// helpers -------------------------------------------------------------------------------------
+function pose(over = {}) {
+  // a neutral standing pose; all landmarks visible
+  const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, visibility: 1 }));
+  const set = (i, x, y) => { lm[i] = { x, y, visibility: 1 }; };
+  set(LM.L_SHOULDER, 0.45, 0.30); set(LM.R_SHOULDER, 0.55, 0.30);
+  set(LM.L_ELBOW, 0.43, 0.42); set(LM.R_ELBOW, 0.57, 0.42);
+  set(LM.L_WRIST, 0.42, 0.52); set(LM.R_WRIST, 0.58, 0.52);
+  set(LM.L_HIP, 0.47, 0.58); set(LM.R_HIP, 0.53, 0.58);
+  set(LM.L_KNEE, 0.47, 0.78); set(LM.R_KNEE, 0.53, 0.78);
+  for (const [i, v] of Object.entries(over)) lm[i] = { ...lm[i], ...v };
+  return lm;
+}
+const shifted = (lm, dx) => lm.map((l) => ({ ...l, x: l.x + dx }));
+
+// matchPeople ---------------------------------------------------------------------------------
+test("matchPeople: pairs the nearest detection with each person", () => {
+  const ex = [{ x: 0.2, closeness: 0.5 }, { x: 0.8, closeness: 0.5 }];
+  const det = [{ x: 0.78, closeness: 0.52 }, { x: 0.22, closeness: 0.48 }];
+  const m = matchPeople(ex, det, 0.25);
+  eq(m.pairs.sort((a, b) => a[0] - b[0]), [[0, 1], [1, 0]]);
+  eq(m.unmatchedExisting, []); eq(m.unmatchedDetections, []);
+});
+test("matchPeople: a detection further than MAX_JUMP stays unmatched", () => {
+  const m = matchPeople([{ x: 0.1, closeness: 0.5 }], [{ x: 0.9, closeness: 0.5 }], 0.25);
+  eq(m.pairs, []); eq(m.unmatchedExisting, [0]); eq(m.unmatchedDetections, [0]);
+});
+test("matchPeople: greedy — the closest pair wins when two people compete", () => {
+  const ex = [{ x: 0.40, closeness: 0.5 }, { x: 0.55, closeness: 0.5 }];
+  const det = [{ x: 0.52, closeness: 0.5 }];
+  const m = matchPeople(ex, det, 0.25);
+  eq(m.pairs, [[1, 0]]); eq(m.unmatchedExisting, [0]);
+});
+test("matchPeople: extra detections / people are reported", () => {
+  const m = matchPeople([], [{ x: 0.5, closeness: 0.5 }], 0.25);
+  eq(m.unmatchedDetections, [0]);
+  const m2 = matchPeople([{ x: 0.5, closeness: 0.5 }], [], 0.25);
+  eq(m2.unmatchedExisting, [0]);
+});
+
+// closenessToBand -----------------------------------------------------------------------------
+test("closenessToBand: 25 / 50 / 75 / 100 with edges at 0.25 / 0.5 / 0.75", () => {
+  const b = CONFIG.BANDS;
+  eq(closenessToBand(0, b), 25); eq(closenessToBand(0.24, b), 25);
+  eq(closenessToBand(0.25, b), 50); eq(closenessToBand(0.49, b), 50);
+  eq(closenessToBand(0.5, b), 75); eq(closenessToBand(0.74, b), 75);
+  eq(closenessToBand(0.75, b), 100); eq(closenessToBand(1, b), 100);
+});
+test("closenessToBand: out-of-range values are clamped", () => {
+  eq(closenessToBand(-3, CONFIG.BANDS), 25); eq(closenessToBand(7, CONFIG.BANDS), 100);
+});
+test("closenessToBand: hysteresis keeps the previous band near an edge", () => {
+  eq(closenessToBand(0.26, CONFIG.BANDS, 25, 0.03), 25);
+  eq(closenessToBand(0.30, CONFIG.BANDS, 25, 0.03), 50);
+  eq(closenessToBand(0.24, CONFIG.BANDS, 50, 0.03), 50);
+  eq(closenessToBand(0.20, CONFIG.BANDS, 50, 0.03), 25);
+});
+
+// computeMotion -------------------------------------------------------------------------------
+test("computeMotion: identical frames → 0", () => {
+  const p = pose();
+  eq(computeMotion(p, p, 1 / 30, 0.1), 0);
+});
+test("computeMotion: whole body moving 0.1 in x over 0.5 s with sw 0.1 → 2 shoulder widths / s", () => {
+  const p = pose();
+  ok(near(computeMotion(p, shifted(p, 0.1), 0.5, 0.1, 1), 2, 1e-9));
+});
+test("computeMotion: normalised by shoulder width (far person with same relative move = same value)", () => {
+  const p = pose();
+  const a = computeMotion(p, shifted(p, 0.1), 0.5, 0.1, 1);
+  const b = computeMotion(p, shifted(p, 0.05), 0.5, 0.05, 1);
+  ok(near(a, b, 1e-9));
+});
+test("computeMotion: only wrists/elbows/hips/knees count", () => {
+  const p = pose();
+  const q = p.map((l) => ({ ...l })); q[LM.NOSE] = { x: 0.9, y: 0.9, visibility: 1 };
+  eq(computeMotion(p, q, 1 / 30, 0.1), 0);
+  const r = p.map((l) => ({ ...l })); r[LM.L_WRIST] = { x: 0.9, y: 0.5, visibility: 1 };
+  ok(computeMotion(p, r, 1 / 30, 0.1) > 0);
+});
+test("computeMotion: bad dt / shoulder width → 0", () => {
+  const p = pose();
+  eq(computeMotion(p, shifted(p, 0.1), 0, 0.1), 0);
+  eq(computeMotion(p, shifted(p, 0.1), 0.1, 0), 0);
+});
+test("normalizeMotion: dead-zone and scaling to 0..1", () => {
+  const cfg = { MOTION_DEADZONE: 0.15, MOTION_MAX: 1.5 };
+  eq(normalizeMotion(0.1, cfg), 0);
+  ok(near(normalizeMotion(0.9, cfg), 0.5));
+  eq(normalizeMotion(99, cfg), 1);
+});
+
+// isArmsUp ------------------------------------------------------------------------------------
+test("isArmsUp: arms down → false", () => { eq(isArmsUp(pose(), 0.03), false); });
+test("isArmsUp: either wrist above the shoulders → true", () => {
+  eq(isArmsUp(pose({ [LM.L_WRIST]: { y: 0.1 } }), 0.03), true);
+  eq(isArmsUp(pose({ [LM.R_WRIST]: { y: 0.1 } }), 0.03), true);
+});
+test("isArmsUp: wrist only slightly above the shoulders stays below the margin", () => {
+  eq(isArmsUp(pose({ [LM.L_WRIST]: { y: 0.29 } }), 0.03), false);
+  eq(isArmsUp(pose({ [LM.L_WRIST]: { y: 0.25 } }), 0.03), true);
+});
+test("isArmsUp: a wrist with very low visibility is ignored", () => {
+  eq(isArmsUp(pose({ [LM.L_WRIST]: { y: 0.1, visibility: 0.05 } }), 0.03), false);
+});
+
+// checkRing -----------------------------------------------------------------------------------
+const cfgR = { RING_MIN_PEOPLE: 4, RING_HOLD: 2, RING_GRACE: 0.4 };
+const group = (n, moving = true) => Array.from({ length: n }, (_, i) => ({ slot: i + 1, moving }));
+test("checkRing: closes only after RING_HOLD seconds of everybody moving", () => {
+  let s = { hold: 0, closed: false, lost: 0 };
+  for (let t = 0; t < 1.9; t += 0.1) s = checkRing(s, group(4), 0.1, cfgR);
+  eq(s.closed, false);
+  for (let t = 0; t < 0.3; t += 0.1) s = checkRing(s, group(4), 0.1, cfgR);
+  eq(s.closed, true);
+});
+test("checkRing: needs at least RING_MIN_PEOPLE people", () => {
+  let s = { hold: 0, closed: false, lost: 0 };
+  for (let t = 0; t < 5; t += 0.1) s = checkRing(s, group(3), 0.1, cfgR);
+  eq(s.closed, false); eq(s.hold, 0);
+});
+test("checkRing: one person standing still prevents / resets the hold", () => {
+  let s = { hold: 0, closed: false, lost: 0 };
+  for (let t = 0; t < 1.5; t += 0.1) s = checkRing(s, group(4), 0.1, cfgR);
+  const g = group(4); g[2].moving = false;
+  s = checkRing(s, g, 0.1, cfgR);
+  eq(s.hold, 0); eq(s.closed, false);
+});
+test("checkRing: an open ring survives a short pause, but not a long one", () => {
+  let s = { hold: 0, closed: false, lost: 0 };
+  for (let t = 0; t < 2.5; t += 0.1) s = checkRing(s, group(5), 0.1, cfgR);
+  eq(s.closed, true);
+  const g = group(5); g[0].moving = false;
+  s = checkRing(s, g, 0.2, cfgR); eq(s.closed, true, "after 0.2 s pause");
+  s = checkRing(s, group(5), 0.1, cfgR); eq(s.closed, true, "resumed");
+  for (let t = 0; t < 0.6; t += 0.1) s = checkRing(s, g, 0.1, cfgR);
+  eq(s.closed, false, "after a long pause");
+});
+
+// computeHandPairs ----------------------------------------------------------------------------
+test("computeHandPairs: neighbours closer than the distance are paired (slot-sorted)", () => {
+  const ppl = [{ slot: 3, x: 0.5 }, { slot: 1, x: 0.4 }, { slot: 2, x: 0.9 }];
+  eq(computeHandPairs(ppl, [], 0.18, 1.2), [[1, 3]]);
+});
+test("computeHandPairs: hysteresis keeps an existing pair slightly beyond the distance", () => {
+  const ppl = [{ slot: 1, x: 0.4 }, { slot: 2, x: 0.6 }];
+  eq(computeHandPairs(ppl, [], 0.18, 1.2), []);
+  eq(computeHandPairs(ppl, [[1, 2]], 0.18, 1.2), [[1, 2]]);
+});
+
+// PeopleTracker (integration of the above) ------------------------------------------------------
+function det(x, extra = {}) {
+  // x = mirrored screen x (what people.js outputs); raw landmarks are unmirrored
+  const sw = 0.15, cx = 1 - x;
+  const lm = pose().map((l) => ({ ...l, x: cx + (l.x - 0.5) * (sw / 0.1) }));
+  return { landmarks: lm, ...extra };
+}
+test("PeopleTracker: first person gets slot 1, second slot 2; x is mirrored", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  t.update([det(0.2), det(0.7)], 0);
+  const p = t.people;
+  eq(p.map((q) => q.slot), [1, 2]);
+  ok(near(p[0].x, 0.2, 0.01), "x mirrored " + p[0].x);
+});
+test("PeopleTracker: slots are stable while moving around", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  t.update([det(0.2), det(0.7)], 0);
+  for (let i = 1; i <= 20; i++) t.update([det(0.2 + i * 0.01), det(0.7 - i * 0.01)], i / 30);
+  const p = t.people;
+  ok(p[0].x < 0.5 && p[1].x > 0.5, "still left/right");
+  eq(p.map((q) => q.slot), [1, 2]);
+});
+test("PeopleTracker: a person is removed after LEAVE_TIMEOUT and the slot is reused (lowest free)", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  t.update([det(0.2), det(0.5), det(0.8)], 0);
+  for (let i = 1; i <= 60; i++) t.update([det(0.2), det(0.8)], i / 30);   // slot 2 missing for 2 s
+  eq(t.people.map((q) => q.slot), [1, 3]);
+  t.update([det(0.2), det(0.5), det(0.8)], 2.1);
+  eq(t.people.map((q) => q.slot), [1, 2, 3]);
+});
+test("PeopleTracker: preferredSlot (simulation) is honoured when free", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  t.update([det(0.5, { preferredSlot: 4 })], 0);
+  eq(t.people[0].slot, 4);
+});
+test("PeopleTracker: at most MAX_PEOPLE people", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  t.update([0.1, 0.25, 0.4, 0.55, 0.7, 0.85].map((x) => det(x)), 0);
+  eq(t.people.length, 5);
+});
+test("PeopleTracker: poses with low visibility are ignored", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  const d = det(0.5); d.landmarks = d.landmarks.map((l) => ({ ...l, visibility: 0.1 }));
+  t.update([d], 0);
+  eq(t.people.length, 0);
+});
+test("PeopleTracker: dancing → moving, then still → stillFor grows", () => {
+  const t = new PeopleTracker({ ...CONFIG });
+  let now = 0;
+  const frame = (i, dance) => {
+    const d = det(0.5);
+    if (dance) for (const j of [15, 16, 13, 14]) d.landmarks[j] = { ...d.landmarks[j], x: d.landmarks[j].x + 0.05 * Math.sin(i * 0.9), y: d.landmarks[j].y + 0.05 * Math.cos(i * 0.9) };
+    now += 1 / 30; t.update([d], now);
+  };
+  for (let i = 0; i < 40; i++) frame(i, true);
+  ok(t.people[0].moving, "moving while dancing; motion=" + t.people[0].motion);
+  for (let i = 0; i < 90; i++) frame(i, false);
+  ok(!t.people[0].moving, "not moving when still");
+  ok(t.people[0].stillFor > 1.5, "stillFor " + t.people[0].stillFor);
+});
+
+// melody.js -------------------------------------------------------------------------------------
+test("extractLine(high): keeps only the highest sounding note", () => {
+  const notes = [{ t: 0, d: 2, n: 60, v: 1 }, { t: 0, d: 1, n: 64, v: 1 }];
+  eq(extractLine(notes, "high").map((e) => [e.t, e.d, e.n]), [[0, 1, 64], [1, 1, 60]]);
+});
+test("extractLine(low): keeps only the lowest sounding note", () => {
+  const notes = [{ t: 0, d: 2, n: 60, v: 1 }, { t: 0, d: 1, n: 64, v: 1 }];
+  eq(extractLine(notes, "low").map((e) => [e.t, e.d, e.n]), [[0, 2, 60]]);
+});
+test("extractLine: repeated equal notes stay separate events", () => {
+  const notes = [{ t: 0, d: 1, n: 62, v: 1 }, { t: 1, d: 1, n: 62, v: 1 }];
+  eq(extractLine(notes, "high").length, 2);
+});
+
+// report ----------------------------------------------------------------------------------------
+const list = document.getElementById("results");
+for (const r of results) {
+  const li = document.createElement("li");
+  li.className = r.ok ? "pass" : "fail";
+  li.textContent = (r.ok ? "✔ " : "✘ ") + r.name + (r.ok ? "" : " — " + r.err);
+  list.appendChild(li);
+}
+const failed = results.filter((r) => !r.ok).length;
+document.getElementById("summary").textContent =
+  failed ? `${failed} of ${results.length} tests FAILED` : `All ${results.length} tests passed`;
+document.getElementById("summary").className = failed ? "fail" : "pass";
+document.title = (failed ? "FAIL" : "PASS") + " — tests";
+window.__testResults = { total: results.length, failed, results };
+</script>
+</body>
+</html>

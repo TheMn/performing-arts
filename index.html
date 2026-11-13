@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dance × Farandole</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <video id="cam" playsinline muted autoplay></video>
+
+  <div id="banner" hidden>Placeholder melodies. Drop the Farandole MIDI file here.</div>
+  <div id="toast" hidden></div>
+  <div id="hint" hidden></div>
+  <div id="drop" hidden><div>Drop the Farandole MIDI file to use it</div></div>
+  <div id="debug" hidden></div>
+  <aside id="settings" hidden></aside>
+
+  <div id="start-screen">
+    <div class="start-card">
+      <h1>Dance <span>×</span> Farandole</h1>
+      <p class="lead">Five dancers hold hands in a ring — but one pair of hands doesn't quite meet.
+        Step in front of the screen: you get your own instrument, and it follows your body.
+        When everybody dances together, the ring closes.</p>
+      <button type="button" id="start-btn">Start</button>
+      <button type="button" id="start-sim" class="secondary">Start without a camera (Simulation)</button>
+      <p id="start-status" role="status"></p>
+      <p class="keys">Keys: <b>T</b> simulation/webcam · <b>1</b>–<b>5</b> add people · <b>Space</b> dance · <b>A</b> arms · <b>D</b> debug · <b>S</b> settings · <b>F</b> fullscreen</p>
+    </div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
